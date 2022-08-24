@@ -2,14 +2,15 @@ package org.bf2.operator.controllers;
 
 import io.javaoperatorsdk.operator.api.reconciler.Context;
 import io.javaoperatorsdk.operator.api.reconciler.ControllerConfiguration;
+import io.javaoperatorsdk.operator.api.reconciler.EventSourceContext;
+import io.javaoperatorsdk.operator.api.reconciler.EventSourceInitializer;
 import io.javaoperatorsdk.operator.api.reconciler.Reconciler;
 import io.javaoperatorsdk.operator.api.reconciler.UpdateControl;
+import io.javaoperatorsdk.operator.processing.event.source.EventSource;
 import io.micrometer.core.annotation.Counted;
 import io.micrometer.core.annotation.Timed;
-import io.quarkus.scheduler.Scheduled;
-import io.quarkus.scheduler.Scheduled.ConcurrentExecution;
 import org.bf2.common.ConditionUtils;
-import org.bf2.common.ManagedKafkaAgentResourceClient;
+import org.bf2.operator.events.AgentResourceEventSource;
 import org.bf2.operator.events.ControllerEventFilter;
 import org.bf2.operator.managers.CapacityManager;
 import org.bf2.operator.managers.InformerManager;
@@ -31,6 +32,7 @@ import javax.inject.Inject;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * The controller for {@link ManagedKafkaAgent}.  However there is currently
@@ -44,13 +46,13 @@ import java.util.Map;
 @ControllerConfiguration(
         generationAwareEventProcessing = false,
         onUpdateFilter = ControllerEventFilter.class)
-public class ManagedKafkaAgentController implements Reconciler<ManagedKafkaAgent> {
+public class ManagedKafkaAgentController implements Reconciler<ManagedKafkaAgent>, EventSourceInitializer<ManagedKafkaAgent> {
 
     @Inject
     Logger log;
 
     @Inject
-    ManagedKafkaAgentResourceClient agentClient;
+    AgentResourceEventSource eventSource;
 
     @Inject
     ObservabilityManager observabilityManager;
@@ -64,38 +66,41 @@ public class ManagedKafkaAgentController implements Reconciler<ManagedKafkaAgent
     @Inject
     InformerManager informerManager;
 
+    @Override
+    public Map<String, EventSource> prepareEventSources(EventSourceContext<ManagedKafkaAgent> context) {
+        return Map.of("agentEvents", eventSource);
+    }
+
     @Timed(value = "controller.update", extraTags = {"resource", "ManagedKafkaAgent"}, description = "Time spent processing createOrUpdate calls")
     @Counted(value = "controller.update", extraTags = {"resource", "ManagedKafkaAgent"}, description = "The number of createOrUpdate calls processed")
     @Override
-    public UpdateControl<ManagedKafkaAgent> reconcile(ManagedKafkaAgent resource, Context context) {
+    public UpdateControl<ManagedKafkaAgent> reconcile(ManagedKafkaAgent resource, Context<ManagedKafkaAgent> context) {
         capacityManager.getOrCreateResourceConfigMap(resource);
-        this.observabilityManager.createOrUpdateObservabilitySecret(resource.getSpec().getObservability(), resource);
+        observabilityManager.createOrUpdateObservabilitySecret(resource.getSpec().getObservability(), resource);
         // since we don't know the prior state, we have to just reconcile everything
         // in case the spec profile information has changed
         informerManager.resyncManagedKafka();
+        boolean statusModified = updateStatus(resource);
+
+        if (statusModified) {
+            return UpdateControl.updateStatus(resource);
+        }
+
         return UpdateControl.noUpdate();
     }
 
-    @Timed(value = "controller.status.update", extraTags = {"resource", "ManagedKafkaAgent"}, description = "Time spent processing status updates")
-    @Counted(value = "controller.status.update", extraTags = {"resource", "ManagedKafkaAgent"}, description = "The number of status updates")
-    @Scheduled(every = "{agent.status.interval}", concurrentExecution = ConcurrentExecution.SKIP)
-    void statusUpdateLoop() {
-        ManagedKafkaAgent resource = this.agentClient.getByName(this.agentClient.getNamespace(), ManagedKafkaAgentResourceClient.RESOURCE_NAME);
-        if (resource != null) {
-            // check and reinstate if the observability config changed
-            this.observabilityManager.createOrUpdateObservabilitySecret(resource.getSpec().getObservability(), resource);
-            log.debugf("Tick to update Kafka agent Status in namespace %s", this.agentClient.getNamespace());
-            resource.setStatus(buildStatus(resource));
-            this.agentClient.replaceStatus(resource);
-        }
-    }
+    private boolean updateStatus(ManagedKafkaAgent resource) {
+        ManagedKafkaAgentStatus originalStatus = null;
 
-    private ManagedKafkaAgentStatus buildStatus(ManagedKafkaAgent resource) {
-        ManagedKafkaAgentStatus status = resource.getStatus();
-        ManagedKafkaCondition readyCondition = null;
-        if (status != null) {
-            readyCondition = ConditionUtils.findManagedKafkaCondition(status.getConditions(), Type.Ready).orElse(null);
+        if (resource.getStatus() != null) {
+            originalStatus = new ManagedKafkaAgentStatusBuilder(resource.getStatus()).build();
         }
+
+        ManagedKafkaAgentStatus status = Objects.requireNonNullElse(resource.getStatus(),
+                new ManagedKafkaAgentStatusBuilder().build());
+
+        ManagedKafkaCondition readyCondition = ConditionUtils.findManagedKafkaCondition(status.getConditions(), Type.Ready)
+                .orElseGet(() -> ConditionUtils.buildCondition(Type.Ready, Status.Unknown));
 
         List<StrimziVersionStatus> strimziVersions = this.strimziManager.getStrimziVersions();
         log.debugf("Strimzi versions %s", strimziVersions);
@@ -103,23 +108,24 @@ public class ManagedKafkaAgentController implements Reconciler<ManagedKafkaAgent
         // consider the fleetshard operator ready when observability is running and a Strimzi bundle is installed (aka at least one available version)
         Status statusValue = this.observabilityManager.isObservabilityRunning() && !strimziVersions.isEmpty() ?
                 ManagedKafkaCondition.Status.True : ManagedKafkaCondition.Status.False;
-        if (readyCondition == null) {
-            readyCondition = ConditionUtils.buildCondition(ManagedKafkaCondition.Type.Ready, statusValue);
-        } else {
-            ConditionUtils.updateConditionStatus(readyCondition, statusValue, null, null);
-        }
+        ConditionUtils.updateConditionStatus(readyCondition, statusValue, null, null);
         if (!this.observabilityManager.isObservabilityRunning()) {
             ConditionUtils.updateConditionStatus(readyCondition, statusValue,null, "Observability secret not yet accepted");
         }
 
         Map<String, ProfileCapacity> capacity = capacityManager.buildCapacity(resource);
 
-        return new ManagedKafkaAgentStatusBuilder()
-                .withConditions(status == null ? Arrays.asList(readyCondition) : status.getConditions())
-                .withUpdatedTimestamp(ConditionUtils.iso8601Now())
-                .withStrimzi(strimziVersions)
-                .withCapacity(capacity)
-                .build();
+        status.setConditions(Arrays.asList(readyCondition));
+        status.setStrimzi(strimziVersions);
+        status.setCapacity(capacity);
+
+        if (!Objects.equals(originalStatus, status)) {
+            status.setUpdatedTimestamp(ConditionUtils.iso8601Now());
+            resource.setStatus(status);
+            return true;
+        }
+
+        return false;
     }
 
 }

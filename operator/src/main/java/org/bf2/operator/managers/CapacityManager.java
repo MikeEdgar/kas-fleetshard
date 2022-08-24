@@ -10,6 +10,8 @@ import lombok.Setter;
 import org.bf2.common.ConditionUtils;
 import org.bf2.common.ManagedKafkaResourceClient;
 import org.bf2.common.OperandUtils;
+import org.bf2.common.ResourceInformerFactory;
+import org.bf2.operator.events.AgentResourceEventSource;
 import org.bf2.operator.operands.AbstractKafkaCluster;
 import org.bf2.operator.operands.KafkaInstanceConfigurations;
 import org.bf2.operator.operands.KafkaInstanceConfigurations.InstanceType;
@@ -24,6 +26,7 @@ import org.bf2.operator.resources.v1alpha1.ProfileCapacity;
 import org.bf2.operator.resources.v1alpha1.ProfileCapacityBuilder;
 import org.jboss.logging.Logger;
 
+import javax.annotation.PostConstruct;
 import javax.enterprise.context.ApplicationScoped;
 import javax.inject.Inject;
 
@@ -56,12 +59,24 @@ public class CapacityManager {
     KubernetesClient client;
 
     @Inject
+    AgentResourceEventSource eventSource;
+
+    @Inject
+    ResourceInformerFactory informerFactory;
+
+    @Inject
     InformerManager informerManager;
 
     @Inject
     ManagedKafkaResourceClient managedKafkaClient;
 
     private boolean checkedForOrphans = false;
+
+    @PostConstruct
+    void initialize() {
+        var fleetshardResources = client.configMaps().withName(CapacityManager.FLEETSHARD_RESOURCES);
+        informerFactory.create(ConfigMap.class, fleetshardResources, eventSource);
+    }
 
     /**
      * Will nominally attempt to create the configmap, if it already exists the existing one will be returned
@@ -118,9 +133,11 @@ public class CapacityManager {
             data.put(InstanceType.STANDARD.getLowerName(), "0"); // the map logic is easier if it's non-empty, until fabric8 6 we'll get back a null data
         }
 
-        configMap = new ConfigMapBuilder().withNewMetadata()
-                .withLabels(OperandUtils.getDefaultLabels())
-                .withName(FLEETSHARD_RESOURCES)
+        configMap = new ConfigMapBuilder()
+                .withNewMetadata()
+                    .withLabels(OperandUtils.getDefaultLabels())
+                    .addToLabels("app.kubernetes.io/name", CapacityManager.FLEETSHARD_RESOURCES)
+                    .withName(FLEETSHARD_RESOURCES)
                 .endMetadata()
                 .withData(data)
                 .build();

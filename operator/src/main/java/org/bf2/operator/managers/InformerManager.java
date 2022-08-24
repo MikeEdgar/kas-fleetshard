@@ -76,9 +76,9 @@ public class InformerManager {
 
         serviceInformer = resourceInformerFactory.create(Service.class, filterManagedByFleetshardOrStrimzi(kubernetesClient.services()), eventSource);
 
-        configMapInformer = resourceInformerFactory.create(ConfigMap.class, filter(kubernetesClient.configMaps()), eventSource);
+        configMapInformer = resourceInformerFactory.create(ConfigMap.class, filter(kubernetesClient.configMaps()).withoutLabel("app.kubernetes.io/name", CapacityManager.FLEETSHARD_RESOURCES), eventSource);
 
-        secretInformer = resourceInformerFactory.create(Secret.class, filter(kubernetesClient.secrets()), eventSource);
+        secretInformer = resourceInformerFactory.create(Secret.class, filter(kubernetesClient.secrets()).withoutLabel("configures", "observability-operator"), eventSource);
 
         // pvcs have an owner reference set to the kafka, not managedkakfa, so we need some lookup logic in the handleEvent
         pvcInformer = resourceInformerFactory.create(PersistentVolumeClaim.class,

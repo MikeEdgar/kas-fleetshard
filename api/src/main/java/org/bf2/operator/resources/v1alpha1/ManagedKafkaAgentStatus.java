@@ -2,8 +2,10 @@ package org.bf2.operator.resources.v1alpha1;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
 import io.sundr.builder.annotations.Buildable;
+import lombok.EqualsAndHashCode;
 import lombok.Getter;
 import lombok.Setter;
+import lombok.ToString;
 
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -13,6 +15,8 @@ import java.util.Map;
 @JsonInclude(JsonInclude.Include.NON_NULL)
 @Getter
 @Setter
+@EqualsAndHashCode
+@ToString
 public class ManagedKafkaAgentStatus {
 
     private List<ManagedKafkaCondition> conditions;

@@ -5,9 +5,16 @@ import io.fabric8.kubernetes.api.model.Secret;
 import io.fabric8.kubernetes.api.model.SecretBuilder;
 import io.fabric8.kubernetes.client.KubernetesClient;
 import io.fabric8.kubernetes.client.dsl.Resource;
+import io.fabric8.kubernetes.client.informers.cache.Cache;
+import io.javaoperatorsdk.operator.processing.event.source.EventSource;
 import org.bf2.common.OperandUtils;
+import org.bf2.common.ResourceInformer;
+import org.bf2.common.ResourceInformerFactory;
+import org.bf2.operator.events.AgentResourceEventSource;
 import org.bf2.operator.resources.v1alpha1.ObservabilityConfiguration;
+import org.jboss.logging.Logger;
 
+import javax.annotation.PostConstruct;
 import javax.enterprise.context.ApplicationScoped;
 import javax.inject.Inject;
 
@@ -18,6 +25,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 @ApplicationScoped
 public class ObservabilityManager {
@@ -30,10 +38,20 @@ public class ObservabilityManager {
     public static final String ACCEPTED = "accepted";
 
     @Inject
+    Logger log;
+
+    @Inject
     KubernetesClient client;
 
     @Inject
-    InformerManager informerManager;
+    ResourceInformerFactory informerFactory;
+
+    @Inject
+    AgentResourceEventSource eventSource;
+
+    ResourceInformer<Secret> observabilitySecretInformer;
+
+    AtomicBoolean secretAccepted = new AtomicBoolean(false);
 
     static Base64.Encoder encoder = Base64.getEncoder();
 
@@ -62,17 +80,29 @@ public class ObservabilityManager {
         return ACCEPTED.equalsIgnoreCase(status);
     }
 
+    @PostConstruct
+    void initialize() {
+        observabilitySecretInformer = informerFactory.create(Secret.class, observabilitySecretResource(), eventSource);
+    }
+
+    public EventSource getEventSource() {
+        return eventSource;
+    }
+
     Resource<Secret> observabilitySecretResource() {
         return this.client.secrets().inNamespace(this.client.getNamespace()).withName(OBSERVABILITY_SECRET_NAME);
     }
 
     Secret cachedObservabilitySecret() {
-        return informerManager.getLocalSecret(this.client.getNamespace(),
-                ObservabilityManager.OBSERVABILITY_SECRET_NAME);
+        return observabilitySecretInformer.getByKey(Cache.namespaceKeyFunc(this.client.getNamespace(),
+                ObservabilityManager.OBSERVABILITY_SECRET_NAME));
     }
 
     public void createOrUpdateObservabilitySecret(ObservabilityConfiguration observability, HasMetadata owner) {
         Secret cached = cachedObservabilitySecret();
+        if (cached == null) {
+            log.info("Creating Observability secret");
+        }
         SecretBuilder builder = Optional.ofNullable(cached).map(s -> new SecretBuilder(s)).orElse(new SecretBuilder());
         createObservabilitySecret(this.client.getNamespace(), observability, builder);
         Secret secret = builder.build();
@@ -82,6 +112,15 @@ public class ObservabilityManager {
 
     public boolean isObservabilityRunning() {
         Secret secret = cachedObservabilitySecret();
-        return secret != null && isObservabilityStatusAccepted(secret);
+        boolean accepted = secret != null && isObservabilityStatusAccepted(secret);
+
+        if (!accepted) {
+            secretAccepted.set(false);
+            log.info("Observability secret not yet accepted");
+        } else if (secretAccepted.compareAndSet(false, true)) {
+            log.info("Observability secret has been accepted");
+        }
+
+        return accepted;
     }
 }

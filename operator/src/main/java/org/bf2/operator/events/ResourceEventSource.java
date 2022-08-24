@@ -49,7 +49,7 @@ public class ResourceEventSource extends AbstractEventSource implements Resource
                     () -> log.warnf("%s %s/%s does not have OwnerReference", resource.getKind(), resource.getMetadata().getNamespace(), resource.getMetadata().getName()));
         }
     }
-    public void handleEvent(CustomResource resource) {
+    public void handleEvent(CustomResource<?, ?> resource) {
         if (getEventHandler() != null) {
             getEventHandler().handleEvent(new ResourceEvent(ResourceAction.UPDATED, ResourceID.fromResource(resource), null));
         }

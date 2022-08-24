@@ -31,10 +31,24 @@ import java.util.stream.Collectors;
 public class MockResourceInformerFactory extends ResourceInformerFactory {
 
     private final Map<Class<?>, List<ResourceEventHandler<?>>> lastHandlerAddedPerType = new HashMap<>();
+    boolean proxy = false;
+
+    public void setProxy(boolean proxy) {
+        this.proxy = proxy;
+    }
+
+    public boolean isProxy() {
+        return proxy;
+    }
 
     @Override
     public <T extends HasMetadata> ResourceInformer<T> create(Class<T> type, Informable<T> informable,
             ResourceEventHandler<? super T> eventHandler) {
+
+        if (proxy) {
+            return super.create(type, informable, eventHandler);
+        }
+
         lastHandlerAddedPerType.computeIfAbsent(type, aClass -> new ArrayList<>()).add(eventHandler);
         ResourceInformer<T> mock = Mockito.mock(ResourceInformer.class);
         Supplier<List<T>> lister = () -> {
@@ -91,6 +105,10 @@ public class MockResourceInformerFactory extends ResourceInformerFactory {
 
     @Override
     public boolean allInformersWatching() {
+        if (proxy) {
+            return super.allInformersWatching();
+        }
+
         return true;
     }
 
